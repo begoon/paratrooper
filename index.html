@@ -1,0 +1,1136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Paratrooper</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #050810;
+    color: #cfd8e3;
+    font-family: "Courier New", monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  #wrap {
+    text-align: center;
+  }
+  canvas {
+    background: #000;
+    border: 2px solid #1d2638;
+    image-rendering: pixelated;
+    box-shadow: 0 0 30px rgba(80, 130, 200, 0.25);
+  }
+  #hint {
+    margin-top: 10px;
+    font-size: 13px;
+    letter-spacing: 1px;
+    color: #6f7d92;
+  }
+  kbd {
+    background: #1a2334;
+    border: 1px solid #2c3a55;
+    border-radius: 3px;
+    padding: 1px 6px;
+    color: #cfd8e3;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="800" height="600"></canvas>
+  <div id="hint">
+    <kbd>&larr;</kbd> <kbd>&rarr;</kbd> aim &nbsp; <kbd>Space</kbd> fire &nbsp; <kbd>P</kbd> pause &nbsp; <kbd>M</kbd> mute &nbsp; <kbd>Enter</kbd> start / restart
+    <br>Gamepad: either stick aims, both front triggers (L2 / R2) fire, Start = Enter
+  </div>
+</div>
+<script>
+(() => {
+  "use strict";
+
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width;
+  const H = canvas.height;
+
+  const GROUND_Y = H - 50;
+  const GUN_X = W / 2;
+  const GUN_BASE_Y = GROUND_Y;
+  const TURRET_Y = GROUND_Y - 28;
+  const BARREL_LEN = 32;
+  const BULLET_SPEED = 9;
+  const GRAVITY = 0.18;
+  const FATAL_FALL = 110;
+  const STACK_LIMIT = 4;
+  const FIRE_COOLDOWN = 12;
+  const ROTATE_SPEED = 0.045;
+  const MIN_ANGLE = -Math.PI * 0.95;
+  const MAX_ANGLE = -Math.PI * 0.05;
+
+  // ---------- audio ----------
+  let audioCtx = null;
+  let muted = false;
+  function audio() {
+    if (!audioCtx) {
+      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch (e) { audioCtx = null; }
+    }
+    return audioCtx;
+  }
+  function beep(freq, dur, type, gain) {
+    if (muted) return;
+    const ac = audio();
+    if (!ac) return;
+    const t = ac.currentTime;
+    const o = ac.createOscillator();
+    const g = ac.createGain();
+    o.type = type || "square";
+    o.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(gain || 0.07, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(ac.destination);
+    o.start(t);
+    o.stop(t + dur);
+  }
+  function noise(dur, gain) {
+    if (muted) return;
+    const ac = audio();
+    if (!ac) return;
+    const buf = ac.createBuffer(1, ac.sampleRate * dur, ac.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+    const src = ac.createBufferSource();
+    src.buffer = buf;
+    const g = ac.createGain();
+    g.gain.value = gain || 0.18;
+    src.connect(g).connect(ac.destination);
+    src.start();
+  }
+  const sfx = {
+    shoot: () => beep(880, 0.05, "square", 0.05),
+    boom:  () => { noise(0.25, 0.22); beep(110, 0.25, "sawtooth", 0.08); },
+    chuteHit: () => beep(440, 0.08, "triangle", 0.06),
+    troopHit: () => beep(220, 0.12, "square", 0.07),
+    land:  () => beep(180, 0.05, "sine", 0.04),
+    splat: () => noise(0.12, 0.12),
+    over:  () => { beep(220, 0.15, "sawtooth", 0.1); setTimeout(() => beep(150, 0.3, "sawtooth", 0.1), 150); },
+    bonus: () => { beep(660, 0.08, "square", 0.06); setTimeout(() => beep(990, 0.12, "square", 0.06), 90); },
+  };
+
+  // ---------- input ----------
+  const keys = Object.create(null);
+  window.addEventListener("keydown", (e) => {
+    if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " "].includes(e.key)) e.preventDefault();
+    keys[e.key] = true;
+    if (e.key === "Enter") {
+      if (game.state === "menu" || game.state === "gameover") game.start();
+    }
+    if (e.key === "p" || e.key === "P") {
+      if (game.state === "playing") game.state = "paused";
+      else if (game.state === "paused") game.state = "playing";
+    }
+    if (e.key === "m" || e.key === "M") muted = !muted;
+  });
+  window.addEventListener("keyup", (e) => { keys[e.key] = false; });
+
+  // ---------- helpers ----------
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const randi = (a, b) => Math.floor(rand(a, b));
+  const choice = (arr) => arr[randi(0, arr.length)];
+
+  // ---------- entities ----------
+  class Bullet {
+    constructor(dist, angle) {
+      this.dist = dist;
+      this.dead = false;
+      this.life = 80;
+      this.x = GUN_X + Math.cos(angle) * dist;
+      this.y = TURRET_Y + Math.sin(angle) * dist;
+      this.px = this.x; this.py = this.y;
+    }
+    update(angle) {
+      this.px = this.x; this.py = this.y;
+      this.dist += BULLET_SPEED;
+      this.x = GUN_X + Math.cos(angle) * this.dist;
+      this.y = TURRET_Y + Math.sin(angle) * this.dist;
+      this.life--;
+      if (this.life <= 0 || this.x < -10 || this.x > W + 10 || this.y < -10 || this.y > GROUND_Y) {
+        this.dead = true;
+      }
+    }
+    draw() {
+      ctx.strokeStyle = "#ffe680";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(this.px, this.py);
+      ctx.lineTo(this.x, this.y);
+      ctx.stroke();
+    }
+  }
+
+  class Helicopter {
+    constructor(side, y, speed) {
+      this.side = side;
+      this.x = side === "left" ? -60 : W + 60;
+      this.y = y;
+      this.vx = (side === "left" ? 1 : -1) * speed;
+      this.dead = false;
+      this.exploding = 0;
+      this.dropsLeft = randi(1, 4);
+      this.dropCooldown = randi(60, 140);
+      this.rotorPhase = 0;
+      this.score = 25;
+    }
+    update(g) {
+      if (this.exploding > 0) {
+        this.exploding--;
+        this.y += 1.2;
+        if (this.y > GROUND_Y - 14 || this.exploding <= 0) this.dead = true;
+        return;
+      }
+      this.x += this.vx;
+      this.rotorPhase += 0.6;
+      if (this.x < -80 || this.x > W + 80) { this.dead = true; return; }
+
+      // drop paratrooper if in safe zone (not over the gun)
+      if (this.dropsLeft > 0) {
+        this.dropCooldown--;
+        const overGun = Math.abs(this.x - GUN_X) < 90;
+        const inField = this.x > 60 && this.x < W - 60;
+        if (this.dropCooldown <= 0 && inField && !overGun) {
+          g.paratroopers.push(new Paratrooper(this.x, this.y + 12));
+          this.dropsLeft--;
+          this.dropCooldown = randi(70, 160);
+        }
+      }
+    }
+    bounds() {
+      // approximate bounding box (body + tail)
+      const dir = this.vx > 0 ? 1 : -1;
+      return { x: this.x - 22, y: this.y - 8, w: 44, h: 18, dir };
+    }
+    hit(b) {
+      if (this.exploding > 0) return false;
+      const r = this.bounds();
+      return b.x > r.x && b.x < r.x + r.w && b.y > r.y && b.y < r.y + r.h;
+    }
+    explode() {
+      this.exploding = 36;
+      sfx.boom();
+    }
+    draw() {
+      const dir = this.vx >= 0 ? 1 : -1;
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.scale(dir, 1);
+
+      if (this.exploding > 0) {
+        // layered fireball that grows then fades
+        const dur = 36;
+        const t = dur - this.exploding;       // 0..dur-1
+        const k = t / dur;                    // 0..1 progress
+        const fade = 1 - k;
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        // outer red glow
+        ctx.fillStyle = "rgba(220, 60, 30, " + (0.55 * fade) + ")";
+        ctx.beginPath();
+        ctx.arc(0, 0, 22 + t * 1.0, 0, Math.PI * 2);
+        ctx.fill();
+        // mid orange fireball (jittered)
+        ctx.fillStyle = "rgba(255, 150, 50, " + (0.85 * Math.max(0, 1 - k * 0.7)) + ")";
+        ctx.beginPath();
+        ctx.arc(rand(-2, 2), rand(-2, 2), 14 + t * 0.7, 0, Math.PI * 2);
+        ctx.fill();
+        // inner yellow flame
+        ctx.fillStyle = "rgba(255, 220, 110, " + Math.max(0, 1 - k * 1.1) + ")";
+        ctx.beginPath();
+        ctx.arc(rand(-2, 2), rand(-2, 2), 8 + t * 0.45, 0, Math.PI * 2);
+        ctx.fill();
+        // hot white core (only at the start)
+        if (t < 9) {
+          ctx.fillStyle = "rgba(255, 255, 230, " + (1 - t / 9) + ")";
+          ctx.beginPath();
+          ctx.arc(0, 0, 5 + t * 1.4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+        // smoke puffs around the wreck (normal blending)
+        ctx.fillStyle = "rgba(40, 40, 40, " + (0.45 * fade) + ")";
+        for (let i = 0; i < 3; i++) {
+          ctx.beginPath();
+          ctx.arc(rand(-14, 14), rand(-14, 14), rand(4, 8), 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+        return;
+      }
+
+      // body (with darker belly + lighter top stripe for shading)
+      ctx.fillStyle = "#2a6a32";
+      ctx.beginPath();
+      ctx.ellipse(0, 1, 16, 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#3a8c44";
+      ctx.beginPath();
+      ctx.ellipse(0, -2, 15, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // body outline
+      ctx.strokeStyle = "rgba(0,0,0,0.45)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 16, 7, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      // cockpit window
+      ctx.fillStyle = "#9ad6ff";
+      ctx.beginPath();
+      ctx.ellipse(8, -1, 6, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // cockpit highlight
+      ctx.fillStyle = "rgba(255,255,255,0.45)";
+      ctx.beginPath();
+      ctx.ellipse(9, -3, 2.6, 1.2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.5)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.ellipse(8, -1, 6, 4, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      // tail boom
+      ctx.fillStyle = "#2a6a32";
+      ctx.beginPath();
+      ctx.moveTo(-12, -2);
+      ctx.lineTo(-26, -1);
+      ctx.lineTo(-26, 2);
+      ctx.lineTo(-12, 3);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.4)";
+      ctx.stroke();
+      // tail fin
+      ctx.fillStyle = "#3a8c44";
+      ctx.beginPath();
+      ctx.moveTo(-23, -1);
+      ctx.lineTo(-29, -9);
+      ctx.lineTo(-26, -1);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      // skids
+      ctx.strokeStyle = "#0d0d0d";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(-13, 8); ctx.lineTo(12, 8);
+      ctx.moveTo(-8, 7); ctx.lineTo(-8, 4);
+      ctx.moveTo(8, 7);  ctx.lineTo(8, 4);
+      ctx.stroke();
+      // mast
+      ctx.strokeStyle = "#1a1a1a";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, -7); ctx.lineTo(0, -11);
+      ctx.stroke();
+
+      // ===== main rotor =====
+      const phase = this.rotorPhase;
+      const mastY = -11;
+      const bladeLen = 26;
+      // motion-blur disc (two stacked translucent ellipses for soft edge)
+      ctx.fillStyle = "rgba(40,40,40,0.10)";
+      ctx.beginPath();
+      ctx.ellipse(0, mastY, bladeLen + 2, 3.2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "rgba(40,40,40,0.18)";
+      ctx.beginPath();
+      ctx.ellipse(0, mastY, bladeLen, 2.0, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // ghost blades behind the leading blade for streak effect
+      ctx.lineCap = "round";
+      for (let i = 3; i >= 1; i--) {
+        const p = phase - i * 0.16;
+        const c = Math.cos(p);
+        const len = Math.abs(c) * bladeLen;
+        const tilt = Math.sin(p) * 0.7;
+        ctx.strokeStyle = "rgba(20,20,20," + (0.10 + 0.04 * (3 - i)) + ")";
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(-len, mastY - tilt);
+        ctx.lineTo( len, mastY + tilt);
+        ctx.stroke();
+      }
+      // leading blade — sharper, with thicker root and tapered tips
+      {
+        const c = Math.cos(phase);
+        const len = Math.abs(c) * bladeLen;
+        const tilt = Math.sin(phase) * 0.7;
+        // dark blade
+        ctx.strokeStyle = "rgba(15,15,15,0.85)";
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.moveTo(-len, mastY - tilt);
+        ctx.lineTo( len, mastY + tilt);
+        ctx.stroke();
+        // thin highlight along the leading edge
+        ctx.strokeStyle = "rgba(180,180,180,0.35)";
+        ctx.lineWidth = 0.6;
+        ctx.beginPath();
+        ctx.moveTo(-len, mastY - tilt - 0.6);
+        ctx.lineTo( len, mastY + tilt - 0.6);
+        ctx.stroke();
+      }
+      ctx.lineCap = "butt";
+      // rotor hub
+      ctx.fillStyle = "#2a2a2a";
+      ctx.beginPath();
+      ctx.arc(0, mastY, 2.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#888";
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+      // hub bolt
+      ctx.fillStyle = "#aaa";
+      ctx.fillRect(-0.5, mastY - 0.5, 1, 1);
+
+      // ===== tail rotor (small spinning disc) =====
+      const trX = -28, trY = -3;
+      // disc blur
+      ctx.fillStyle = "rgba(35,35,35,0.28)";
+      ctx.beginPath();
+      ctx.arc(trX, trY, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "rgba(35,35,35,0.14)";
+      ctx.beginPath();
+      ctx.arc(trX, trY, 6, 0, Math.PI * 2);
+      ctx.fill();
+      // crossed blade silhouettes (3 blades, spinning faster than main)
+      const tp = phase * 1.8;
+      ctx.strokeStyle = "rgba(15,15,15,0.7)";
+      ctx.lineWidth = 1.1;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      for (let i = 0; i < 3; i++) {
+        const a = tp + i * (Math.PI * 2 / 3);
+        ctx.moveTo(trX, trY);
+        ctx.lineTo(trX + Math.cos(a) * 4.6, trY + Math.sin(a) * 4.6);
+      }
+      ctx.stroke();
+      ctx.lineCap = "butt";
+      // tail rotor hub
+      ctx.fillStyle = "#1a1a1a";
+      ctx.beginPath();
+      ctx.arc(trX, trY, 1.2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+  }
+
+  class Paratrooper {
+    constructor(x, y) {
+      this.x = x; this.y = y;
+      this.vx = 0; this.vy = 0;
+      this.state = "freefall"; // freefall -> chute -> falling/landed -> walking -> stacked -> climbing
+      this.deployHeight = rand(GROUND_Y - 360, GROUND_Y - 180);
+      this.fallStart = y;
+      this.dead = false;
+      this.side = null;
+      this.stackIndex = -1;
+      this.target = null;
+      this.walkSpeed = rand(0.5, 0.9);
+      this.climbT = 0;
+      this.scored = false;
+    }
+    update(g) {
+      if (this.state === "freefall") {
+        this.vy += GRAVITY * 0.6;
+        if (this.vy > 2.8) this.vy = 2.8;
+        this.y += this.vy;
+        if (this.y >= this.deployHeight) {
+          this.state = "chute";
+          this.vy = 0.9;
+          this.fallStart = this.y;
+        }
+      } else if (this.state === "chute") {
+        this.y += this.vy;
+        // gentle drift
+        this.x += Math.sin((this.y + this.fallStart) * 0.02) * 0.15;
+        if (this.y >= GROUND_Y - 10) {
+          this.state = "walking";
+          this.y = GROUND_Y - 10;
+          this.side = this.x < GUN_X ? "left" : "right";
+          sfx.land();
+        }
+      } else if (this.state === "falling") {
+        // chute removed mid-air
+        this.vy += GRAVITY;
+        this.y += this.vy;
+        if (this.y >= GROUND_Y - 10) {
+          this.y = GROUND_Y - 10;
+          const fallDist = this.y - this.fallStart;
+          if (fallDist > FATAL_FALL) {
+            this.dead = true;
+            sfx.splat();
+            g.score += 5;
+            g.addPop(this.x, this.y, "+5");
+          } else {
+            // survived the fall — start walking
+            this.state = "walking";
+            this.side = this.x < GUN_X ? "left" : "right";
+            sfx.land();
+          }
+        }
+      } else if (this.state === "walking") {
+        const dir = this.side === "left" ? 1 : -1;
+        // figure out my target slot in the stack
+        const stack = g.stacks[this.side];
+        if (this.stackIndex < 0) {
+          // claim the next free slot
+          this.stackIndex = stack.length;
+          stack.push(this);
+        }
+        const slot = slotPosition(this.side, this.stackIndex);
+        this.target = slot;
+        // walk toward slot.x
+        if (Math.abs(this.x - slot.x) > this.walkSpeed) {
+          this.x += dir * this.walkSpeed;
+        } else {
+          this.x = slot.x;
+          // climb up to slot.y if needed
+          if (this.y > slot.y) {
+            this.y -= 0.7;
+            if (this.y < slot.y) this.y = slot.y;
+          } else {
+            this.state = "stacked";
+            // if this completed the doom stack, the topmost climbs over
+            if (stack.length >= STACK_LIMIT && !g.invading) {
+              g.invading = true;
+              const top = stack[stack.length - 1];
+              top.state = "climbing";
+              top.climbT = 0;
+            }
+          }
+        }
+      } else if (this.state === "stacked") {
+        // sit still in slot
+        if (this.target) { this.x = this.target.x; this.y = this.target.y; }
+      } else if (this.state === "climbing") {
+        // walk over the top of the bunker and the gun => game over
+        this.climbT += 0.012;
+        const t = this.climbT;
+        const dir = this.side === "left" ? 1 : -1;
+        const startX = this.target ? this.target.x : this.x;
+        const startY = this.target ? this.target.y : this.y;
+        const endX = GUN_X + dir * -8;
+        const endY = TURRET_Y - 8;
+        // arc over
+        this.x = startX + (endX - startX) * t;
+        this.y = startY + (endY - startY) * t - Math.sin(Math.PI * t) * 14;
+        if (t >= 1) g.triggerGameOver();
+      }
+    }
+    bounds() {
+      // body box
+      return { x: this.x - 4, y: this.y - 14, w: 8, h: 14 };
+    }
+    chuteBounds() {
+      if (this.state !== "chute") return null;
+      return { x: this.x - 9, y: this.y - 26, w: 18, h: 10 };
+    }
+    cutChute(g) {
+      if (this.state !== "chute") return;
+      this.state = "falling";
+      this.fallStart = this.y;
+      sfx.chuteHit();
+      g.score += 10;
+      g.addPop(this.x, this.y - 18, "+10");
+    }
+    kill(g, points) {
+      this.dead = true;
+      sfx.troopHit();
+      g.score += points;
+      g.addPop(this.x, this.y - 6, "+" + points);
+    }
+    draw() {
+      // body (helmet + torso + legs)
+      const bx = this.x, by = this.y;
+      // legs
+      ctx.strokeStyle = "#222";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(bx - 2, by - 4); ctx.lineTo(bx - 3, by);
+      ctx.moveTo(bx + 2, by - 4); ctx.lineTo(bx + 3, by);
+      ctx.stroke();
+      // torso
+      ctx.fillStyle = "#3b6e3a";
+      ctx.fillRect(bx - 3, by - 10, 6, 7);
+      // arms
+      ctx.fillStyle = "#3b6e3a";
+      ctx.fillRect(bx - 5, by - 9, 2, 5);
+      ctx.fillRect(bx + 3, by - 9, 2, 5);
+      // head
+      ctx.fillStyle = "#e2c79a";
+      ctx.beginPath();
+      ctx.arc(bx, by - 12, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      // helmet
+      ctx.fillStyle = "#2f5a2f";
+      ctx.beginPath();
+      ctx.arc(bx, by - 13, 3, Math.PI, 0);
+      ctx.fill();
+
+      if (this.state === "chute") {
+        // strings
+        ctx.strokeStyle = "#ddd";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(bx - 8, by - 18); ctx.lineTo(bx - 1, by - 13);
+        ctx.moveTo(bx + 8, by - 18); ctx.lineTo(bx + 1, by - 13);
+        ctx.moveTo(bx, by - 22);     ctx.lineTo(bx, by - 13);
+        ctx.stroke();
+        // canopy
+        ctx.fillStyle = "#d94545";
+        ctx.beginPath();
+        ctx.arc(bx, by - 22, 10, Math.PI, 0);
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(bx - 4, by - 22, 3, Math.PI, 0);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(bx + 4, by - 22, 3, Math.PI, 0);
+        ctx.fill();
+      }
+    }
+  }
+
+  function slotPosition(side, index) {
+    const dir = side === "left" ? -1 : 1;
+    // first trooper stops next to the bunker's outer wall, then they stack upward
+    const baseX = GUN_X + dir * (24 + 0); // hugging the bunker
+    const x = baseX;
+    const y = (GROUND_Y - 10) - index * 16;
+    return { x, y };
+  }
+
+  // ---------- popups ----------
+  class Popup {
+    constructor(x, y, text, color) {
+      this.x = x; this.y = y;
+      this.text = text;
+      this.color = color || "#ffe680";
+      this.life = 50;
+    }
+    update() { this.y -= 0.6; this.life--; }
+    draw() {
+      ctx.globalAlpha = Math.max(0, this.life / 50);
+      ctx.fillStyle = this.color;
+      ctx.font = "bold 12px Courier New, monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(this.text, this.x, this.y);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // ---------- particles ----------
+  class Particle {
+    constructor(opts) {
+      Object.assign(this, {
+        x: 0, y: 0, vx: 0, vy: 0,
+        color: "#ff8a3d", life: 30,
+        kind: "spark",            // spark | blob | smoke | debris | ring
+        size: 2, grow: 0,
+        gravity: 0.06, drag: 1,
+        rot: 0, vrot: 0,
+        additive: false,
+      }, opts);
+      this.max = this.life;
+    }
+    update() {
+      this.x += this.vx; this.y += this.vy;
+      this.vy += this.gravity;
+      this.vx *= this.drag; this.vy *= this.drag;
+      this.rot += this.vrot;
+      this.size += this.grow;
+      if (this.size < 0.1) this.size = 0.1;
+      this.life--;
+    }
+    draw() {
+      const a = Math.max(0, this.life / this.max);
+      const prevOp = ctx.globalCompositeOperation;
+      if (this.additive) ctx.globalCompositeOperation = "lighter";
+      ctx.globalAlpha = a;
+      ctx.fillStyle = this.color;
+      if (this.kind === "ring") {
+        ctx.globalAlpha = a * 0.7;
+        ctx.strokeStyle = this.color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (this.kind === "debris") {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.rot);
+        ctx.fillRect(-this.size, -this.size * 0.4, this.size * 2, this.size * 0.8);
+        ctx.restore();
+      } else if (this.kind === "blob" || this.kind === "smoke") {
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.fill();
+      } else { // spark
+        ctx.fillRect(this.x | 0, this.y | 0, this.size, this.size);
+      }
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = prevOp;
+    }
+  }
+
+  // ---------- game ----------
+  const game = {
+    state: "menu",   // menu | playing | paused | gameover
+    score: 0,
+    best: Number(localStorage.getItem("paratrooper_best") || 0),
+    level: 1,
+    angle: -Math.PI / 2,
+    fireCD: 0,
+    bullets: [],
+    helis: [],
+    paratroopers: [],
+    popups: [],
+    parts: [],
+    stacks: { left: [], right: [] },
+    spawnT: 0,
+    invading: false,
+    overTimer: 0,
+    stars: [],
+    init() {
+      this.stars = [];
+      for (let i = 0; i < 70; i++) {
+        this.stars.push({ x: rand(0, W), y: rand(0, GROUND_Y - 60), a: rand(0.3, 1) });
+      }
+    },
+    start() {
+      this.state = "playing";
+      this.score = 0;
+      this.level = 1;
+      this.angle = -Math.PI / 2;
+      this.fireCD = 0;
+      this.bullets = [];
+      this.helis = [];
+      this.paratroopers = [];
+      this.popups = [];
+      this.parts = [];
+      this.stacks = { left: [], right: [] };
+      this.spawnT = 80;
+      this.invading = false;
+      this.overTimer = 0;
+      audio(); // ensure unlocked
+    },
+    addPop(x, y, t, c) { this.popups.push(new Popup(x, y, t, c)); },
+    boom(x, y) {
+      // shockwave
+      this.parts.push(new Particle({
+        x, y, kind: "ring", color: "#fff2c0",
+        size: 4, grow: 2.0, life: 18, gravity: 0, additive: true,
+      }));
+      // bright central flash, shrinks fast
+      this.parts.push(new Particle({
+        x, y, kind: "blob", color: "#fff7cc",
+        size: 18, grow: -0.7, life: 12, gravity: 0, additive: true,
+      }));
+      // fireball puffs (yellow -> orange -> red)
+      const fireCols = ["#ffe680", "#ffa83a", "#ff5a1f", "#c4290f"];
+      for (let i = 0; i < 12; i++) {
+        const a = rand(0, Math.PI * 2);
+        const s = rand(0.4, 1.8);
+        this.parts.push(new Particle({
+          x, y, kind: "blob",
+          vx: Math.cos(a) * s, vy: Math.sin(a) * s - 0.5,
+          color: fireCols[Math.min(fireCols.length - 1, Math.floor(i / 3))],
+          size: rand(6, 12), grow: -0.18,
+          life: randi(24, 44), gravity: 0.015, drag: 0.96,
+          additive: true,
+        }));
+      }
+      // sparks (bright tracers)
+      for (let i = 0; i < 26; i++) {
+        const a = rand(0, Math.PI * 2);
+        const s = rand(2.5, 6.5);
+        this.parts.push(new Particle({
+          x, y, kind: "spark",
+          vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+          color: choice(["#fff2a8", "#ffd23d", "#ff8a3d"]),
+          size: 2,
+          life: randi(22, 42), gravity: 0.18, drag: 0.99,
+          additive: true,
+        }));
+      }
+      // debris chunks (mostly upward, then fall)
+      for (let i = 0; i < 8; i++) {
+        const a = rand(-Math.PI * 0.9, -Math.PI * 0.1);
+        const s = rand(2, 5);
+        this.parts.push(new Particle({
+          x, y, kind: "debris",
+          vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+          color: choice(["#2a2a2a", "#3a3a3a", "#1f3a1f"]),
+          size: rand(2, 4),
+          rot: rand(0, Math.PI * 2), vrot: rand(-0.35, 0.35),
+          life: randi(50, 90), gravity: 0.2, drag: 0.995,
+        }));
+      }
+      // smoke that rises and grows
+      for (let i = 0; i < 7; i++) {
+        const a = rand(0, Math.PI * 2);
+        const s = rand(0.2, 0.8);
+        this.parts.push(new Particle({
+          x: x + rand(-5, 5), y: y + rand(-5, 5), kind: "smoke",
+          vx: Math.cos(a) * s, vy: Math.sin(a) * s - 0.5,
+          color: i % 2 ? "rgba(60,60,60,0.7)" : "rgba(35,35,35,0.7)",
+          size: rand(6, 10), grow: 0.22,
+          life: randi(60, 100), gravity: -0.018, drag: 0.99,
+        }));
+      }
+    },
+    splat(x, y) {
+      // small red burst for paratrooper hits — not a fireball
+      for (let i = 0; i < 12; i++) {
+        const a = rand(0, Math.PI * 2);
+        const s = rand(1, 3);
+        this.parts.push(new Particle({
+          x, y, kind: "spark",
+          vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+          color: choice(["#ff5050", "#cc3030", "#ff8080"]),
+          size: 2, life: randi(16, 28),
+          gravity: 0.18, drag: 0.99,
+        }));
+      }
+    },
+    triggerGameOver() {
+      if (this.state === "gameover") return;
+      this.state = "gameover";
+      this.overTimer = 0;
+      sfx.over();
+      if (this.score > this.best) {
+        this.best = this.score;
+        localStorage.setItem("paratrooper_best", String(this.best));
+      }
+    },
+    fire() {
+      if (this.fireCD > 0) return;
+      // bullets travel along the current barrel ray from the turret pivot;
+      // rotating the barrel sweeps every bullet still in flight
+      this.bullets.push(new Bullet(BARREL_LEN, this.angle));
+      this.fireCD = FIRE_COOLDOWN;
+      sfx.shoot();
+    },
+    pollGamepad() {
+      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+      let pad = null;
+      for (const gp of pads) { if (gp) { pad = gp; break; } }
+      this.gamepadConnected = !!pad;
+      if (!pad) { this._padStartWas = false; return; }
+      const dz = 0.22;
+      const ax = pad.axes;
+      const lx = ax[0] || 0, ly = ax[1] || 0;
+      const rx = ax[2] || 0, ry = ax[3] || 0;
+      const lm = Math.hypot(lx, ly);
+      const rm = Math.hypot(rx, ry);
+      // pick whichever stick is being pushed harder; ignore if below deadzone
+      let sx = 0, sy = 0, sm = 0;
+      if (lm >= rm && lm > dz) { sx = lx; sy = ly; sm = lm; }
+      else if (rm > dz)        { sx = rx; sy = ry; sm = rm; }
+      // only aim when stick has an upward component (don't snap to ground)
+      if (sm > 0 && sy < 0.15) {
+        let a = Math.atan2(sy, sx);
+        if (a > MAX_ANGLE) a = MAX_ANGLE;
+        if (a < MIN_ANGLE) a = MIN_ANGLE;
+        this.angle = a;
+      }
+      // front pedals = L2 / R2 = buttons 6 and 7 in the standard mapping
+      const t6 = pad.buttons[6], t7 = pad.buttons[7];
+      const trig = (b) => b && (b.pressed || (typeof b.value === "number" && b.value > 0.4));
+      if (this.state === "playing" && (trig(t6) || trig(t7))) this.fire();
+      // Start button (9) acts like Enter for menu / game over / pause toggle
+      const start = pad.buttons[9];
+      const startNow = !!(start && start.pressed);
+      if (startNow && !this._padStartWas) {
+        if (this.state === "menu" || this.state === "gameover") this.start();
+        else if (this.state === "playing") this.state = "paused";
+        else if (this.state === "paused")  this.state = "playing";
+      }
+      this._padStartWas = startNow;
+    },
+    update() {
+      // gamepad polled in every state so Start can begin/restart
+      this.pollGamepad();
+      if (this.state === "playing") {
+        // keyboard input
+        if (keys["ArrowLeft"])  this.angle -= ROTATE_SPEED;
+        if (keys["ArrowRight"]) this.angle += ROTATE_SPEED;
+        if (this.angle < MIN_ANGLE) this.angle = MIN_ANGLE;
+        if (this.angle > MAX_ANGLE) this.angle = MAX_ANGLE;
+        if (keys[" "]) this.fire();
+        if (this.fireCD > 0) this.fireCD--;
+
+        // spawn helis
+        this.spawnT--;
+        if (this.spawnT <= 0 && this.helis.length < 4) {
+          const side = Math.random() < 0.5 ? "left" : "right";
+          const y = rand(60, GROUND_Y - 320);
+          const speed = 1 + this.level * 0.15 + rand(0, 0.6);
+          this.helis.push(new Helicopter(side, y, speed));
+          this.spawnT = randi(120, 240) - this.level * 8;
+          if (this.spawnT < 60) this.spawnT = 60;
+        }
+        // level up by score thresholds
+        const newLevel = 1 + Math.floor(this.score / 300);
+        if (newLevel > this.level) { this.level = newLevel; sfx.bonus(); }
+
+        // entities
+        for (const b of this.bullets) b.update(this.angle);
+        for (const h of this.helis) h.update(this);
+        for (const p of this.paratroopers) p.update(this);
+        for (const f of this.popups) f.update();
+        for (const f of this.parts) f.update();
+
+        // collisions: bullets vs helis
+        for (const b of this.bullets) {
+          if (b.dead) continue;
+          for (const h of this.helis) {
+            if (h.dead || h.exploding > 0) continue;
+            if (h.hit(b)) {
+              b.dead = true;
+              h.explode();
+              this.boom(h.x, h.y);
+              this.score += h.score;
+              this.addPop(h.x, h.y - 10, "+" + h.score);
+              break;
+            }
+          }
+        }
+        // collisions: bullets vs paratroopers / chutes
+        for (const b of this.bullets) {
+          if (b.dead) continue;
+          for (const p of this.paratroopers) {
+            if (p.dead) continue;
+            const cb = p.chuteBounds();
+            if (cb && b.x > cb.x && b.x < cb.x + cb.w && b.y > cb.y && b.y < cb.y + cb.h) {
+              b.dead = true;
+              p.cutChute(this);
+              break;
+            }
+            const bb = p.bounds();
+            if (b.x > bb.x && b.x < bb.x + bb.w && b.y > bb.y && b.y < bb.y + bb.h) {
+              b.dead = true;
+              const pts = (p.state === "freefall" || p.state === "falling") ? 20
+                       : (p.state === "stacked" || p.state === "climbing") ? 50
+                       : 15;
+              p.kill(this, pts);
+              this.splat(p.x, p.y - 6);
+              break;
+            }
+          }
+        }
+
+        // remove dead paratroopers from stacks (compact slots)
+        for (const side of ["left", "right"]) {
+          const stack = this.stacks[side];
+          // remove dead entries and reassign indices
+          const alive = stack.filter(p => !p.dead);
+          if (alive.length !== stack.length) {
+            for (let i = 0; i < alive.length; i++) {
+              alive[i].stackIndex = i;
+              if (alive[i].state === "stacked") alive[i].target = slotPosition(side, i);
+              if (alive[i].state === "climbing") {
+                // if the climbing trooper died, abort invasion
+              }
+            }
+            // if any were climbing and died, allow new invasion attempts
+            if (!alive.some(p => p.state === "climbing")) {
+              if (this.invading && alive.length < STACK_LIMIT) this.invading = false;
+            }
+          }
+          this.stacks[side] = alive;
+        }
+
+        // cull
+        this.bullets = this.bullets.filter(b => !b.dead);
+        this.helis = this.helis.filter(h => !h.dead);
+        this.paratroopers = this.paratroopers.filter(p => !p.dead);
+        this.popups = this.popups.filter(p => p.life > 0);
+        this.parts = this.parts.filter(p => p.life > 0);
+      } else if (this.state === "gameover") {
+        for (const f of this.parts) f.update();
+        this.parts = this.parts.filter(p => p.life > 0);
+        this.overTimer++;
+      }
+    },
+    draw() {
+      // sky gradient
+      const g = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+      g.addColorStop(0, "#0b1228");
+      g.addColorStop(1, "#3b2a4a");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, GROUND_Y);
+
+      // stars
+      for (const s of this.stars) {
+        ctx.globalAlpha = s.a;
+        ctx.fillStyle = "#cfd8e3";
+        ctx.fillRect(s.x | 0, s.y | 0, 1, 1);
+      }
+      ctx.globalAlpha = 1;
+
+      // moon
+      ctx.fillStyle = "#f1e4a8";
+      ctx.beginPath();
+      ctx.arc(W - 80, 80, 22, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#0b1228";
+      ctx.beginPath();
+      ctx.arc(W - 70, 76, 20, 0, Math.PI * 2);
+      ctx.fill();
+
+      // ground
+      ctx.fillStyle = "#3a2a1a";
+      ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+      ctx.fillStyle = "#2c1f12";
+      for (let x = 0; x < W; x += 12) {
+        ctx.fillRect(x, GROUND_Y + 6 + ((x / 12) % 3), 6, 2);
+      }
+
+      // bunker
+      ctx.fillStyle = "#5a5a5a";
+      ctx.beginPath();
+      ctx.moveTo(GUN_X - 30, GROUND_Y);
+      ctx.lineTo(GUN_X - 22, GROUND_Y - 20);
+      ctx.lineTo(GUN_X + 22, GROUND_Y - 20);
+      ctx.lineTo(GUN_X + 30, GROUND_Y);
+      ctx.closePath();
+      ctx.fill();
+      // bunker top
+      ctx.fillStyle = "#444";
+      ctx.fillRect(GUN_X - 22, GROUND_Y - 22, 44, 4);
+      // turret
+      ctx.fillStyle = "#7a7a7a";
+      ctx.beginPath();
+      ctx.arc(GUN_X, TURRET_Y, 10, Math.PI, 0);
+      ctx.fill();
+      ctx.fillStyle = "#2a2a2a";
+      ctx.fillRect(GUN_X - 12, TURRET_Y, 24, 2);
+
+      // barrel
+      ctx.save();
+      ctx.translate(GUN_X, TURRET_Y);
+      ctx.rotate(this.angle);
+      ctx.fillStyle = "#222";
+      ctx.fillRect(0, -3, BARREL_LEN, 6);
+      ctx.fillStyle = "#444";
+      ctx.fillRect(BARREL_LEN - 4, -4, 4, 8);
+      // recoil flash
+      if (this.fireCD > FIRE_COOLDOWN - 4) {
+        ctx.fillStyle = "#ffe680";
+        ctx.beginPath();
+        ctx.arc(BARREL_LEN + 2, 0, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // entities
+      for (const h of this.helis) h.draw();
+      for (const p of this.paratroopers) p.draw();
+      for (const b of this.bullets) b.draw();
+      for (const f of this.parts) f.draw();
+      for (const f of this.popups) f.draw();
+
+      // HUD
+      ctx.fillStyle = "#cfd8e3";
+      ctx.font = "bold 16px Courier New, monospace";
+      ctx.textAlign = "left";
+      ctx.fillText("SCORE " + String(this.score).padStart(6, "0"), 14, 24);
+      ctx.textAlign = "center";
+      ctx.fillText("LVL " + this.level, W / 2, 24);
+      ctx.textAlign = "right";
+      ctx.fillText("BEST " + String(this.best).padStart(6, "0"), W - 14, 24);
+
+      // stack danger indicator
+      const lc = this.stacks.left.length;
+      const rc = this.stacks.right.length;
+      ctx.font = "bold 11px Courier New, monospace";
+      ctx.textAlign = "center";
+      ctx.fillStyle = lc >= 3 ? "#ff5050" : "#7f8c9c";
+      ctx.fillText("L " + lc + "/" + STACK_LIMIT, GUN_X - 60, GROUND_Y + 40);
+      ctx.fillStyle = rc >= 3 ? "#ff5050" : "#7f8c9c";
+      ctx.fillText("R " + rc + "/" + STACK_LIMIT, GUN_X + 60, GROUND_Y + 40);
+
+      if (this.state === "menu")     this.drawMenu();
+      if (this.state === "paused")   this.drawCenter("PAUSED", "Press P to resume");
+      if (this.state === "gameover") this.drawGameOver();
+      ctx.font = "11px Courier New, monospace";
+      ctx.textAlign = "right";
+      let hudY = H - 8;
+      if (muted) { ctx.fillStyle = "#7f8c9c"; ctx.fillText("MUTED", W - 14, hudY); hudY -= 14; }
+      if (this.gamepadConnected) { ctx.fillStyle = "#7fc78a"; ctx.fillText("GAMEPAD", W - 14, hudY); }
+    },
+    drawMenu() {
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#ffe680";
+      ctx.font = "bold 56px Courier New, monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("PARATROOPER", W / 2, H / 2 - 40);
+      ctx.fillStyle = "#cfd8e3";
+      ctx.font = "16px Courier New, monospace";
+      ctx.fillText("Defend the bunker. Don't let four stack up.", W / 2, H / 2);
+      ctx.fillText("Arrow keys to aim, Space to fire.", W / 2, H / 2 + 24);
+      ctx.fillStyle = "#ffe680";
+      ctx.font = "bold 18px Courier New, monospace";
+      ctx.fillText("Press ENTER to start", W / 2, H / 2 + 70);
+    },
+    drawCenter(title, sub) {
+      ctx.fillStyle = "rgba(0,0,0,0.5)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#ffe680";
+      ctx.font = "bold 42px Courier New, monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(title, W / 2, H / 2 - 10);
+      if (sub) {
+        ctx.fillStyle = "#cfd8e3";
+        ctx.font = "16px Courier New, monospace";
+        ctx.fillText(sub, W / 2, H / 2 + 22);
+      }
+    },
+    drawGameOver() {
+      ctx.fillStyle = "rgba(0,0,0,0.6)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#ff5050";
+      ctx.font = "bold 48px Courier New, monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("GAME OVER", W / 2, H / 2 - 20);
+      ctx.fillStyle = "#cfd8e3";
+      ctx.font = "18px Courier New, monospace";
+      ctx.fillText("Score " + this.score + "   Best " + this.best, W / 2, H / 2 + 16);
+      if (this.overTimer > 30) {
+        ctx.fillStyle = "#ffe680";
+        ctx.font = "bold 16px Courier New, monospace";
+        ctx.fillText("Press ENTER to play again", W / 2, H / 2 + 56);
+      }
+    },
+  };
+
+  game.init();
+
+  function loop() {
+    game.update();
+    game.draw();
+    requestAnimationFrame(loop);
+  }
+  loop();
+})();
+</script>
+</body>
+</html>
