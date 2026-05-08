@@ -117,8 +117,8 @@
   const GUN_BASE_Y = GROUND_Y;
   const TURRET_Y = GROUND_Y - 28;
   const BARREL_LEN = 32;
-  const BULLET_SPEED = 9;
-  const GRAVITY = 0.18;
+  const BULLET_SPEED = 6;
+  const GRAVITY = 0.12;
   const FATAL_FALL = 110;
   const STACK_LIMIT = 4;
   const FIRE_COOLDOWN = 12;
@@ -547,11 +547,11 @@
     update(g) {
       if (this.state === "freefall") {
         this.vy += GRAVITY * 0.6;
-        if (this.vy > 2.8) this.vy = 2.8;
+        if (this.vy > 1.87) this.vy = 1.87;
         this.y += this.vy;
         if (this.y >= this.deployHeight) {
           this.state = "chute";
-          this.vy = 0.9;
+          this.vy = 0.6;
           this.fallStart = this.y;
         }
       } else if (this.state === "chute") {
