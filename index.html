@@ -2,12 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Paratrooper</title>
 <style>
   html, body {
     margin: 0;
     padding: 0;
     height: 100%;
+    width: 100%;
     background: #050810;
     color: #cfd8e3;
     font-family: "Courier New", monospace;
@@ -15,15 +17,24 @@
     align-items: center;
     justify-content: center;
     overflow: hidden;
+    overscroll-behavior: none;
   }
   #wrap {
     text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    max-width: 100%;
+    max-height: 100%;
   }
   canvas {
     background: #000;
     border: 2px solid #1d2638;
     image-rendering: pixelated;
     box-shadow: 0 0 30px rgba(80, 130, 200, 0.25);
+    touch-action: none;
+    display: block;
   }
   #hint {
     margin-top: 10px;
@@ -37,6 +48,10 @@
     border-radius: 3px;
     padding: 1px 6px;
     color: #cfd8e3;
+  }
+  @media (pointer: coarse) {
+    #hint { display: none; }
+    canvas { border: none; box-shadow: none; }
   }
 </style>
 </head>
@@ -56,6 +71,45 @@
   const ctx = canvas.getContext("2d");
   const W = canvas.width;
   const H = canvas.height;
+  const isTouch = ("ontouchstart" in window) || (navigator.maxTouchPoints > 0);
+
+  // ---------- responsive scaling ----------
+  function fitCanvas() {
+    const aspect = W / H;
+    const hint = document.getElementById("hint");
+    const hintH = (hint && hint.offsetParent !== null) ? hint.offsetHeight + 14 : 0;
+    const availH = Math.max(0, window.innerHeight - hintH - 4);
+    const availW = Math.max(0, window.innerWidth - 4);
+    let cssW, cssH;
+    if (availW / availH > aspect) {
+      cssH = availH;
+      cssW = cssH * aspect;
+    } else {
+      cssW = availW;
+      cssH = cssW / aspect;
+    }
+    canvas.style.width = cssW + "px";
+    canvas.style.height = cssH + "px";
+  }
+  window.addEventListener("resize", fitCanvas);
+  window.addEventListener("orientationchange", fitCanvas);
+  fitCanvas();
+
+  async function ensureLandscape() {
+    if (!isTouch) return;
+    try {
+      const el = document.documentElement;
+      const req = el.requestFullscreen || el.webkitRequestFullscreen;
+      if (req && !document.fullscreenElement && !document.webkitFullscreenElement) {
+        await req.call(el);
+      }
+    } catch (e) {}
+    try {
+      if (screen.orientation && screen.orientation.lock) {
+        await screen.orientation.lock("landscape");
+      }
+    } catch (e) {}
+  }
 
   const GROUND_Y = H - 50;
   const GUN_X = W / 2;
@@ -136,6 +190,50 @@
     if (e.key === "m" || e.key === "M") muted = !muted;
   });
   window.addEventListener("keyup", (e) => { keys[e.key] = false; });
+
+  // ---------- touch ----------
+  let touchMoved = false;
+  let touchStartX = 0, touchStartY = 0;
+  let lastTouchX = 0;
+  canvas.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    if (e.touches.length === 0) return;
+    const t = e.touches[0];
+    touchStartX = t.clientX;
+    touchStartY = t.clientY;
+    lastTouchX = t.clientX;
+    touchMoved = false;
+    audio();
+    if (game.state === "menu" || game.state === "gameover") {
+      game.start();
+      ensureLandscape();
+      // mark as moved so the touchend that follows the start-tap doesn't immediately fire
+      touchMoved = true;
+    }
+  }, { passive: false });
+  canvas.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    if (e.touches.length === 0) return;
+    const t = e.touches[0];
+    const dx = t.clientX - lastTouchX;
+    lastTouchX = t.clientX;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width > 0 && game.state === "playing") {
+      game.angle += (dx / rect.width) * (MAX_ANGLE - MIN_ANGLE);
+      if (game.angle < MIN_ANGLE) game.angle = MIN_ANGLE;
+      if (game.angle > MAX_ANGLE) game.angle = MAX_ANGLE;
+    }
+    if (Math.hypot(t.clientX - touchStartX, t.clientY - touchStartY) > 8) {
+      touchMoved = true;
+    }
+  }, { passive: false });
+  canvas.addEventListener("touchend", (e) => {
+    e.preventDefault();
+    if (!touchMoved && game.state === "playing") {
+      game.fire();
+    }
+  }, { passive: false });
+  canvas.addEventListener("touchcancel", () => { touchMoved = true; });
 
   // ---------- helpers ----------
   const rand = (a, b) => a + Math.random() * (b - a);
@@ -1086,10 +1184,10 @@
       ctx.fillStyle = "#cfd8e3";
       ctx.font = "16px Courier New, monospace";
       ctx.fillText("Defend the bunker. Don't let four stack up.", W / 2, H / 2);
-      ctx.fillText("Arrow keys to aim, Space to fire.", W / 2, H / 2 + 24);
+      ctx.fillText(isTouch ? "Slide to aim, tap to fire." : "Arrow keys to aim, Space to fire.", W / 2, H / 2 + 24);
       ctx.fillStyle = "#ffe680";
       ctx.font = "bold 18px Courier New, monospace";
-      ctx.fillText("Press ENTER to start", W / 2, H / 2 + 70);
+      ctx.fillText(isTouch ? "Tap to start" : "Press ENTER to start", W / 2, H / 2 + 70);
     },
     drawCenter(title, sub) {
       ctx.fillStyle = "rgba(0,0,0,0.5)";
@@ -1117,7 +1215,7 @@
       if (this.overTimer > 30) {
         ctx.fillStyle = "#ffe680";
         ctx.font = "bold 16px Courier New, monospace";
-        ctx.fillText("Press ENTER to play again", W / 2, H / 2 + 56);
+        ctx.fillText(isTouch ? "Tap to play again" : "Press ENTER to play again", W / 2, H / 2 + 56);
       }
     },
   };
