@@ -246,17 +246,22 @@
   class Bullet {
     constructor(dist, angle) {
       this.dist = dist;
+      this.angle = angle;
       this.dead = false;
       this.life = 80;
       this.x = GUN_X + Math.cos(angle) * dist;
       this.y = TURRET_Y + Math.sin(angle) * dist;
       this.px = this.x; this.py = this.y;
     }
-    update(angle) {
+    update(gunAngle) {
       this.px = this.x; this.py = this.y;
+      // inertia: bullet's own angle eases toward the barrel; the further
+      // it has travelled the more "committed" it is, so the less it follows.
+      const k = 0.22 * Math.exp(-this.dist * 0.004);
+      this.angle += (gunAngle - this.angle) * k;
       this.dist += BULLET_SPEED;
-      this.x = GUN_X + Math.cos(angle) * this.dist;
-      this.y = TURRET_Y + Math.sin(angle) * this.dist;
+      this.x = GUN_X + Math.cos(this.angle) * this.dist;
+      this.y = TURRET_Y + Math.sin(this.angle) * this.dist;
       this.life--;
       if (this.life <= 0 || this.x < -10 || this.x > W + 10 || this.y < -10 || this.y > GROUND_Y) {
         this.dead = true;
