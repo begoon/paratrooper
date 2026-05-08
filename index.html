@@ -268,12 +268,27 @@
       }
     }
     draw() {
-      ctx.strokeStyle = "#ffe680";
-      ctx.lineWidth = 2;
+      // dark outline so the tracer stays readable against the sky and grass
+      ctx.lineCap = "round";
+      ctx.strokeStyle = "#2a0a00";
+      ctx.lineWidth = 5;
       ctx.beginPath();
       ctx.moveTo(this.px, this.py);
       ctx.lineTo(this.x, this.y);
       ctx.stroke();
+      // hot orange core
+      ctx.strokeStyle = "#ff4a14";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(this.px, this.py);
+      ctx.lineTo(this.x, this.y);
+      ctx.stroke();
+      ctx.lineCap = "butt";
+      // bright tip
+      ctx.fillStyle = "#fff2b0";
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, 2.4, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 
