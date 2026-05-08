@@ -10,8 +10,8 @@
     padding: 0;
     height: 100%;
     width: 100%;
-    background: #050810;
-    color: #cfd8e3;
+    background: #cfe5f5;
+    color: #2a3a55;
     font-family: "Courier New", monospace;
     display: flex;
     align-items: center;
@@ -30,10 +30,10 @@
     max-height: 100%;
   }
   canvas {
-    background: #000;
-    border: 2px solid #1d2638;
+    background: #cce8f5;
+    border: 2px solid #9bb6cc;
     image-rendering: pixelated;
-    box-shadow: 0 0 30px rgba(80, 130, 200, 0.25);
+    box-shadow: 0 0 30px rgba(120, 170, 220, 0.35);
     touch-action: none;
     display: block;
   }
@@ -41,14 +41,14 @@
     margin-top: 10px;
     font-size: 13px;
     letter-spacing: 1px;
-    color: #6f7d92;
+    color: #5a6e85;
   }
   kbd {
-    background: #1a2334;
-    border: 1px solid #2c3a55;
+    background: #eaf2fb;
+    border: 1px solid #9bb6cc;
     border-radius: 3px;
     padding: 1px 6px;
-    color: #cfd8e3;
+    color: #2a3a55;
   }
   @media (pointer: coarse) {
     #hint { display: none; }
@@ -806,11 +806,16 @@
     spawnT: 0,
     invading: false,
     overTimer: 0,
-    stars: [],
+    clouds: [],
     init() {
-      this.stars = [];
-      for (let i = 0; i < 70; i++) {
-        this.stars.push({ x: rand(0, W), y: rand(0, GROUND_Y - 60), a: rand(0.3, 1) });
+      this.clouds = [];
+      for (let i = 0; i < 6; i++) {
+        this.clouds.push({
+          x: rand(0, W),
+          y: rand(40, GROUND_Y - 220),
+          s: rand(0.7, 1.4),
+          a: rand(0.65, 0.95),
+        });
       }
     },
     start() {
@@ -1072,39 +1077,49 @@
     draw() {
       // sky gradient
       const g = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
-      g.addColorStop(0, "#0b1228");
-      g.addColorStop(1, "#3b2a4a");
+      g.addColorStop(0, "#5fa8d8");
+      g.addColorStop(1, "#cce8f5");
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, W, GROUND_Y);
 
-      // stars
-      for (const s of this.stars) {
-        ctx.globalAlpha = s.a;
-        ctx.fillStyle = "#cfd8e3";
-        ctx.fillRect(s.x | 0, s.y | 0, 1, 1);
-      }
+      // sun
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = "#fff5b0";
+      ctx.beginPath();
+      ctx.arc(W - 80, 80, 34, 0, Math.PI * 2);
+      ctx.fill();
       ctx.globalAlpha = 1;
-
-      // moon
-      ctx.fillStyle = "#f1e4a8";
+      ctx.fillStyle = "#ffd966";
       ctx.beginPath();
       ctx.arc(W - 80, 80, 22, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = "#0b1228";
+      ctx.fillStyle = "#ffea99";
       ctx.beginPath();
-      ctx.arc(W - 70, 76, 20, 0, Math.PI * 2);
+      ctx.arc(W - 80, 80, 17, 0, Math.PI * 2);
       ctx.fill();
 
-      // ground
-      ctx.fillStyle = "#3a2a1a";
+      // clouds
+      for (const c of this.clouds) {
+        ctx.globalAlpha = c.a;
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.ellipse(c.x,             c.y,     22 * c.s, 8 * c.s, 0, 0, Math.PI * 2);
+        ctx.ellipse(c.x - 14 * c.s,  c.y + 2, 14 * c.s, 6 * c.s, 0, 0, Math.PI * 2);
+        ctx.ellipse(c.x + 14 * c.s,  c.y + 2, 16 * c.s, 7 * c.s, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      // ground (grass)
+      ctx.fillStyle = "#8fc25c";
       ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
-      ctx.fillStyle = "#2c1f12";
+      ctx.fillStyle = "#6fa047";
       for (let x = 0; x < W; x += 12) {
         ctx.fillRect(x, GROUND_Y + 6 + ((x / 12) % 3), 6, 2);
       }
 
       // bunker
-      ctx.fillStyle = "#5a5a5a";
+      ctx.fillStyle = "#9a9a9a";
       ctx.beginPath();
       ctx.moveTo(GUN_X - 30, GROUND_Y);
       ctx.lineTo(GUN_X - 22, GROUND_Y - 20);
@@ -1113,14 +1128,14 @@
       ctx.closePath();
       ctx.fill();
       // bunker top
-      ctx.fillStyle = "#444";
+      ctx.fillStyle = "#777";
       ctx.fillRect(GUN_X - 22, GROUND_Y - 22, 44, 4);
       // turret
-      ctx.fillStyle = "#7a7a7a";
+      ctx.fillStyle = "#b0b0b0";
       ctx.beginPath();
       ctx.arc(GUN_X, TURRET_Y, 10, Math.PI, 0);
       ctx.fill();
-      ctx.fillStyle = "#2a2a2a";
+      ctx.fillStyle = "#3a3a3a";
       ctx.fillRect(GUN_X - 12, TURRET_Y, 24, 2);
 
       // barrel
@@ -1148,7 +1163,7 @@
       for (const f of this.popups) f.draw();
 
       // HUD
-      ctx.fillStyle = "#cfd8e3";
+      ctx.fillStyle = "#1a2a40";
       ctx.font = "bold 16px Courier New, monospace";
       ctx.textAlign = "left";
       ctx.fillText("SCORE " + String(this.score).padStart(6, "0"), 14, 24);
@@ -1162,9 +1177,9 @@
       const rc = this.stacks.right.length;
       ctx.font = "bold 11px Courier New, monospace";
       ctx.textAlign = "center";
-      ctx.fillStyle = lc >= 3 ? "#ff5050" : "#7f8c9c";
+      ctx.fillStyle = lc >= 3 ? "#c93030" : "#3a4a60";
       ctx.fillText("L " + lc + "/" + STACK_LIMIT, GUN_X - 60, GROUND_Y + 40);
-      ctx.fillStyle = rc >= 3 ? "#ff5050" : "#7f8c9c";
+      ctx.fillStyle = rc >= 3 ? "#c93030" : "#3a4a60";
       ctx.fillText("R " + rc + "/" + STACK_LIMIT, GUN_X + 60, GROUND_Y + 40);
 
       if (this.state === "menu")     this.drawMenu();
@@ -1173,49 +1188,49 @@
       ctx.font = "11px Courier New, monospace";
       ctx.textAlign = "right";
       let hudY = H - 8;
-      if (muted) { ctx.fillStyle = "#7f8c9c"; ctx.fillText("MUTED", W - 14, hudY); hudY -= 14; }
-      if (this.gamepadConnected) { ctx.fillStyle = "#7fc78a"; ctx.fillText("GAMEPAD", W - 14, hudY); }
+      if (muted) { ctx.fillStyle = "#3a4a60"; ctx.fillText("MUTED", W - 14, hudY); hudY -= 14; }
+      if (this.gamepadConnected) { ctx.fillStyle = "#2a8a3a"; ctx.fillText("GAMEPAD", W - 14, hudY); }
     },
     drawMenu() {
-      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.fillStyle = "rgba(255,255,255,0.55)";
       ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = "#ffe680";
+      ctx.fillStyle = "#0a3a6a";
       ctx.font = "bold 56px Courier New, monospace";
       ctx.textAlign = "center";
       ctx.fillText("PARATROOPER", W / 2, H / 2 - 40);
-      ctx.fillStyle = "#cfd8e3";
+      ctx.fillStyle = "#1a2a40";
       ctx.font = "16px Courier New, monospace";
       ctx.fillText("Defend the bunker. Don't let four stack up.", W / 2, H / 2);
       ctx.fillText(isTouch ? "Slide to aim, tap to fire." : "Arrow keys to aim, Space to fire.", W / 2, H / 2 + 24);
-      ctx.fillStyle = "#ffe680";
+      ctx.fillStyle = "#d97800";
       ctx.font = "bold 18px Courier New, monospace";
       ctx.fillText(isTouch ? "Tap to start" : "Press ENTER to start", W / 2, H / 2 + 70);
     },
     drawCenter(title, sub) {
-      ctx.fillStyle = "rgba(0,0,0,0.5)";
+      ctx.fillStyle = "rgba(255,255,255,0.55)";
       ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = "#ffe680";
+      ctx.fillStyle = "#0a3a6a";
       ctx.font = "bold 42px Courier New, monospace";
       ctx.textAlign = "center";
       ctx.fillText(title, W / 2, H / 2 - 10);
       if (sub) {
-        ctx.fillStyle = "#cfd8e3";
+        ctx.fillStyle = "#1a2a40";
         ctx.font = "16px Courier New, monospace";
         ctx.fillText(sub, W / 2, H / 2 + 22);
       }
     },
     drawGameOver() {
-      ctx.fillStyle = "rgba(0,0,0,0.6)";
+      ctx.fillStyle = "rgba(255,255,255,0.6)";
       ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = "#ff5050";
+      ctx.fillStyle = "#c93030";
       ctx.font = "bold 48px Courier New, monospace";
       ctx.textAlign = "center";
       ctx.fillText("GAME OVER", W / 2, H / 2 - 20);
-      ctx.fillStyle = "#cfd8e3";
+      ctx.fillStyle = "#1a2a40";
       ctx.font = "18px Courier New, monospace";
       ctx.fillText("Score " + this.score + "   Best " + this.best, W / 2, H / 2 + 16);
       if (this.overTimer > 30) {
-        ctx.fillStyle = "#ffe680";
+        ctx.fillStyle = "#d97800";
         ctx.font = "bold 16px Courier New, monospace";
         ctx.fillText(isTouch ? "Tap to play again" : "Press ENTER to play again", W / 2, H / 2 + 56);
       }
