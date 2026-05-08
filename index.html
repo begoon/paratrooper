@@ -18,6 +18,7 @@
     justify-content: center;
     overflow: hidden;
     overscroll-behavior: none;
+    touch-action: none;
   }
   #wrap {
     text-align: center;
@@ -195,7 +196,7 @@
   let touchMoved = false;
   let touchStartX = 0, touchStartY = 0;
   let lastTouchX = 0;
-  canvas.addEventListener("touchstart", (e) => {
+  window.addEventListener("touchstart", (e) => {
     e.preventDefault();
     if (e.touches.length === 0) return;
     const t = e.touches[0];
@@ -211,15 +212,16 @@
       touchMoved = true;
     }
   }, { passive: false });
-  canvas.addEventListener("touchmove", (e) => {
+  window.addEventListener("touchmove", (e) => {
     e.preventDefault();
     if (e.touches.length === 0) return;
     const t = e.touches[0];
     const dx = t.clientX - lastTouchX;
     lastTouchX = t.clientX;
     const rect = canvas.getBoundingClientRect();
-    if (rect.width > 0 && game.state === "playing") {
-      game.angle += (dx / rect.width) * (MAX_ANGLE - MIN_ANGLE);
+    const refW = rect.width > 0 ? rect.width : window.innerWidth;
+    if (game.state === "playing") {
+      game.angle += (dx / refW) * (MAX_ANGLE - MIN_ANGLE);
       if (game.angle < MIN_ANGLE) game.angle = MIN_ANGLE;
       if (game.angle > MAX_ANGLE) game.angle = MAX_ANGLE;
     }
@@ -227,13 +229,13 @@
       touchMoved = true;
     }
   }, { passive: false });
-  canvas.addEventListener("touchend", (e) => {
+  window.addEventListener("touchend", (e) => {
     e.preventDefault();
     if (!touchMoved && game.state === "playing") {
       game.fire();
     }
   }, { passive: false });
-  canvas.addEventListener("touchcancel", () => { touchMoved = true; });
+  window.addEventListener("touchcancel", () => { touchMoved = true; });
 
   // ---------- helpers ----------
   const rand = (a, b) => a + Math.random() * (b - a);
